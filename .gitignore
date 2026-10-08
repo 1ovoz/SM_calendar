@@ -1,0 +1,6 @@
+bin/
+obj/
+dist/
+*.user
+client_secret*.json
+.vscode/
