@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SM Calendar 개인정보처리방침</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>개인정보처리방침</h1>
+  <p class="sub">SM Calendar · 시행일 2026년 10월 8일</p>
+
+  <p>SM Calendar(이하 "앱")는 사용자의 PC 에서만 동작하는 Windows 데스크톱 프로그램입니다.
+  앱 개발자는 별도의 서버를 운영하지 않으며, 사용자의 데이터를 수집하거나 전송받지 않습니다.</p>
+
+  <h2>1. 접근하는 정보</h2>
+  <p>사용자가 Google 계정으로 로그인해 권한을 허용하면, 앱은 다음 Google 데이터에 접근합니다.</p>
+  <ul>
+    <li><b>캘린더 목록</b> (<code>calendar.readonly</code>): 캘린더 이름, 색상, 접근 권한</li>
+    <li><b>일정</b> (<code>calendar.events</code>): 일정 제목, 시간, 장소, 설명. 사용자가 앱에서 일정을 추가·수정·삭제할 때 해당 내용을 Google 캘린더에 반영합니다.</li>
+  </ul>
+
+  <h2>2. 이용 목적</h2>
+  <p>위 정보는 바탕화면 달력에 일정을 표시하고, 사용자가 요청한 일정 변경을 Google 캘린더에 반영하는 목적으로만 사용합니다.
+  광고, 분석, 프로파일링, AI 모델 학습 등 다른 목적으로 사용하지 않습니다.</p>
+
+  <h2>3. 저장 위치</h2>
+  <ul>
+    <li>모든 데이터는 사용자 PC 의 <code>%APPDATA%\SMCalendar</code> 폴더에만 저장됩니다.</li>
+    <li>오프라인 표시를 위한 일정 캐시가 저장되며, 오래된 일정은 자동으로 삭제됩니다.</li>
+    <li>Google 로그인 토큰은 Windows DPAPI 로 암호화되어, 해당 Windows 사용자 계정에서만 복호화할 수 있습니다.</li>
+  </ul>
+
+  <h2>4. 제3자 제공</h2>
+  <p>앱은 Google API 와 직접 통신할 뿐, 사용자의 데이터를 개발자나 제3자에게 전송·판매·공유하지 않습니다.</p>
+
+  <h2>5. Google API 서비스 사용자 데이터 정책 준수</h2>
+  <p>앱이 Google API 로부터 받은 정보를 사용하고 다른 앱으로 전송하는 방식은
+  <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API 서비스 사용자 데이터 정책</a>의
+  제한적 사용(Limited Use) 요구사항을 준수합니다.</p>
+
+  <h2>6. 데이터 삭제와 권한 철회</h2>
+  <ul>
+    <li>앱 메뉴의 <b>로그아웃</b>을 누르면 토큰을 폐기하고 PC 에 저장된 일정 캐시를 삭제합니다.</li>
+    <li><a href="https://myaccount.google.com/permissions">Google 계정 → 타사 액세스</a>에서 언제든 앱의 권한을 철회할 수 있습니다.</li>
+    <li><code>%APPDATA%\SMCalendar</code> 폴더를 삭제하면 앱이 저장한 모든 데이터가 지워집니다.</li>
+  </ul>
+
+  <h2>7. 문의</h2>
+  <p><a href="https://github.com/1ovoz/SM_calendar/issues">GitHub Issues</a> 를 통해 문의할 수 있습니다.</p>
+
+  <footer><a href="index.html">← SM Calendar 홈</a></footer>
+</main>
+</body>
+</html>
