@@ -4,3 +4,4 @@ dist/
 *.user
 client_secret*.json
 .vscode/
+release/

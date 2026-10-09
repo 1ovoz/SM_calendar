@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Text.Json.Serialization;
 
 namespace SMCalendar.Core;
@@ -10,6 +11,8 @@ public sealed class CalendarInfo
     public string AccessRole { get; set; } = "reader";
     public bool Primary { get; set; }
     public bool SelectedInGoogle { get; set; } = true;
+    /// <summary>IANA 시간대 (예: Asia/Seoul). 반복 일정 생성 시 필요.</summary>
+    public string? TimeZone { get; set; }
 
     [JsonIgnore] public bool CanWrite => AccessRole is "owner" or "writer";
     [JsonIgnore] public bool IsHoliday => Id.Contains("#holiday@", StringComparison.Ordinal);
@@ -30,6 +33,12 @@ public sealed class CalEvent
     public string? ColorId { get; set; }
     public string? RecurringEventId { get; set; }
     public string? HtmlLink { get; set; }
+    /// <summary>true 면 캘린더 기본 알림 사용.</summary>
+    public bool ReminderDefault { get; set; } = true;
+    /// <summary>개별 알림 (시작 몇 분 전).</summary>
+    public List<int>? ReminderMinutes { get; set; }
+    /// <summary>반복 규칙 (RRULE 등). 반복 일정의 원본(master)을 따로 조회했을 때만 채워진다.</summary>
+    public List<string>? Recurrence { get; set; }
 
     public bool OccursOn(DateTime day)
     {
@@ -40,10 +49,28 @@ public sealed class CalEvent
     [JsonIgnore] public bool IsMultiDay => AllDay ? (End - Start).TotalDays > 1 : End > Start.Date.AddDays(1);
 }
 
-/// <summary>편집기에서 저장할 내용.</summary>
+public sealed class ReminderSpec
+{
+    public bool UseDefault { get; set; }
+    public List<int> Minutes { get; set; } = new();
+}
+
+/// <summary>반복 일정 편집 범위.</summary>
+public enum EditScope { Single, Instance, Series }
+
+/// <summary>편집기에서 저장할 내용. null/false 인 선택 항목은 서버 값을 건드리지 않는다.</summary>
 public sealed class EventDraft
 {
     public string CalendarId { get; set; } = "";
+    public string? TimeZone { get; set; }
+    /// <summary>ColorSet 이 true 일 때만 반영. null = 캘린더 기본색.</summary>
+    public string? ColorId { get; set; }
+    public bool ColorSet { get; set; }
+    /// <summary>null 이면 알림을 건드리지 않음.</summary>
+    public ReminderSpec? Reminders { get; set; }
+    /// <summary>RecurrenceSet 이 true 일 때만 반영. null = 반복 안 함.</summary>
+    public List<string>? Recurrence { get; set; }
+    public bool RecurrenceSet { get; set; }
     public string Title { get; set; } = "";
     public string? Location { get; set; }
     public string? Description { get; set; }
@@ -77,6 +104,7 @@ public sealed class GCalendarListEntry
     public string? AccessRole { get; set; }
     public bool? Primary { get; set; }
     public bool? Selected { get; set; }
+    public string? TimeZone { get; set; }
 }
 
 public sealed class GEventList
@@ -97,6 +125,20 @@ public sealed class GEvent
     public string? HtmlLink { get; set; }
     public GEventTime? Start { get; set; }
     public GEventTime? End { get; set; }
+    public GReminders? Reminders { get; set; }
+    public List<string>? Recurrence { get; set; }
+}
+
+public sealed class GReminders
+{
+    public bool? UseDefault { get; set; }
+    public List<GReminder>? Overrides { get; set; }
+}
+
+public sealed class GReminder
+{
+    public string? Method { get; set; }
+    public int Minutes { get; set; }
 }
 
 public sealed class GEventTime
@@ -129,6 +171,7 @@ public sealed class ClientInfo
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(AppSettings))]
+[JsonSerializable(typeof(WidgetSettings))]
 [JsonSerializable(typeof(EventCache))]
 [JsonSerializable(typeof(GCalendarList))]
 [JsonSerializable(typeof(GEventList))]

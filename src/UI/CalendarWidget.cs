@@ -6,34 +6,47 @@ using SMCalendar.Core;
 
 namespace SMCalendar.UI;
 
-internal enum HitKind { None, Drag, Button, Cell, DayNumber, Event, More, Status, Grip }
-internal enum Btn { Prev, Next, Today, Sync, Add, Menu }
+internal enum HitKind { None, Drag, Title, Button, Cell, DayNumber, Event, More, Status, Grip, MiniDay, AddDay, AgendaArea }
+internal enum Btn { Prev, Next, Today, View, Add, Pin, Collapse, Hide, Menu }
 
-internal readonly record struct Hit(HitKind Kind, RectangleF Rect, int Index = -1, Btn Button = default, CalEvent? Event = null);
+internal readonly record struct Hit(HitKind Kind, RectangleF Rect, int Index = -1, Btn Button = default, CalEvent? Event = null,
+    DateTime Date = default);
+
+/// <summary>위젯이 앱(트레이)에 요청하는 동작.</summary>
+internal interface IWidgetHost
+{
+    void ShowWidgetMenu(CalendarWidget widget, Point screen);
+    void HideWidget(CalendarWidget widget);
+    void SaveSettings();
+}
 
 /// <summary>
-/// 바탕화면 달력 위젯.
+/// 바탕화면 달력 위젯 (월간 / 미니 월간 / 미니 어젠다 / 미니 앱).
 /// 컨트롤을 하나도 쓰지 않고 per-pixel alpha 레이어드 창(UpdateLayeredWindow)에 직접 그린다.
 /// 상태가 바뀔 때만 다시 그리므로 평소 CPU 사용량은 0 에 가깝다.
 /// </summary>
-internal sealed class CalendarWidget : Form
+internal sealed partial class CalendarWidget : Form
 {
-    const int Weeks = 6;
+    const int GridDays = 42;
     static readonly string[] DayNames = ["일", "월", "화", "수", "목", "금", "토"];
-    static readonly string IconFamily = FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
-    const string UiFamily = "Malgun Gothic";
+    static readonly string IconFamily = Ui.IconFamily;
 
     readonly AppSettings _s;
+    readonly WidgetSettings _w;
     readonly CalendarService _svc;
-    readonly ContextMenuStrip _menu;
+    readonly IWidgetHost _host;
     readonly List<Hit> _hits = new();
     Hit _hover, _pressed;
+    Point _pressPoint;
+    bool _inside;
 
     int _year, _month;
     DateTime _selected = DateTime.Today;
     DateTime _gridStart;
-    readonly List<CalEvent>[] _days = new List<CalEvent>[Weeks * 7];
-    readonly bool[] _holiday = new bool[Weeks * 7];
+    readonly List<CalEvent>[] _days = new List<CalEvent>[GridDays];
+    readonly bool[] _holiday = new bool[GridDays];
+    readonly List<(DateTime Day, List<CalEvent> Events)> _agenda = new();
+    float _agendaScroll, _agendaMaxScroll;
 
     readonly System.Windows.Forms.Timer _navTimer = new() { Interval = 450 };
     readonly System.Windows.Forms.Timer _peekTimer = new() { Interval = 8000 };
@@ -47,12 +60,14 @@ internal sealed class CalendarWidget : Form
     Bitmap? _surface;
     int _surfaceW, _surfaceH;
     UiFonts? _fonts;
+    Font? _popupFont;
 
-    public CalendarWidget(AppSettings settings, CalendarService service, ContextMenuStrip menu)
+    public CalendarWidget(AppSettings settings, WidgetSettings widget, CalendarService service, IWidgetHost host)
     {
         _s = settings;
+        _w = widget;
         _svc = service;
-        _menu = menu;
+        _host = host;
 
         Text = "SM Calendar";
         FormBorderStyle = FormBorderStyle.None;
@@ -64,15 +79,22 @@ internal sealed class CalendarWidget : Form
         for (int i = 0; i < _days.Length; i++) _days[i] = new List<CalEvent>();
         _year = DateTime.Today.Year;
         _month = DateTime.Today.Month;
-        ApplyBounds(DeviceDpi);
         ComputeGrid();
+        ApplyBounds(DeviceDpi);
 
         _svc.Changed += OnServiceChanged;
         _navTimer.Tick += (_, _) => { _navTimer.Stop(); _ = _svc.SyncAsync(); };
         _peekTimer.Tick += (_, _) => { if (!Bounds.Contains(Cursor.Position)) EndPeek(); };
     }
 
+    public WidgetSettings Settings => _w;
+    public bool DarkTheme => _s.DarkTheme;
     new float Scale => DeviceDpi / 96f;
+    /// <summary>글자 크기 배율.</summary>
+    float F => (float)_w.FontScale;
+    /// <summary>글자에 맞춰 커지는 길이 단위.</summary>
+    float U => Scale * F;
+    bool HasAgenda => _w.Kind is WidgetKind.MiniAgenda or WidgetKind.MiniApp;
 
     protected override CreateParams CreateParams
     {
@@ -104,35 +126,51 @@ internal sealed class CalendarWidget : Form
     void ApplyBounds(int dpi)
     {
         float sc = dpi / 96f;
-        var b = new Rectangle(_s.X, _s.Y, (int)(_s.Width * sc), (int)(_s.Height * sc));
-        if (_s.X == int.MinValue || !Screen.AllScreens.Any(sc2 => sc2.WorkingArea.IntersectsWith(b)))
+        var min = WidgetSettings.MinimumSize(_w.Kind);
+        var b = new Rectangle(_w.X, _w.Y, (int)(_w.Width * sc), _w.Collapsed ? CollapsedHeight(sc) : (int)(_w.Height * sc));
+        if (_w.X == int.MinValue || !Screen.AllScreens.Any(scr => scr.WorkingArea.IntersectsWith(b)))
         {
             var wa = Screen.PrimaryScreen!.WorkingArea;
             b.X = wa.Right - b.Width - (int)(24 * sc);
             b.Y = wa.Top + (int)(24 * sc);
         }
-        MinimumSize = new Size((int)(340 * sc), (int)(280 * sc));
+        MinimumSize = new Size((int)(min.Width * sc), _w.Collapsed ? 1 : (int)(min.Height * sc));
         Bounds = b;
     }
 
-    // ===================== 바탕화면 고정 =====================
+    int CollapsedHeight(float sc) => (int)Math.Ceiling(HeaderHeight(sc) + 4 * sc);
+
+    float HeaderHeight(float sc)
+    {
+        float fl = 1 + (F - 1) * 0.7f;
+        return (_w.Kind == WidgetKind.Month ? 46 : 38) * sc * fl;
+    }
+
+    // ===================== 창 고정 방식 =====================
 
     /// <summary>
-    /// 바탕화면 창(Progman)을 소유자로 지정하면 Win+D(바탕화면 보기)에도 숨겨지지 않고,
-    /// z-order 를 항상 맨 아래로 고정해서 다른 창 위로 올라오지 않는다.
+    /// 항상 위: 다른 창보다 위에 표시.
+    /// 바탕화면 고정: 바탕화면 창(Progman)을 소유자로 지정해서 Win+D 에도 숨겨지지 않고, 맨 아래에 머문다.
     /// </summary>
     public void ApplyPin()
     {
         if (!IsHandleCreated) return;
         const uint flags = Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE;
-        if (_s.PinToDesktop)
+        if (_w.AlwaysOnTop)
         {
+            Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, IntPtr.Zero);
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, flags);
+        }
+        else if (_w.PinToDesktop)
+        {
+            Native.SetWindowPos(Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
             Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, Native.FindWindow("Progman", null));
             Native.SetWindowPos(Handle, Native.HWND_BOTTOM, 0, 0, 0, 0, flags);
         }
         else
         {
             Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, IntPtr.Zero);
+            Native.SetWindowPos(Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
             Native.SetWindowPos(Handle, Native.HWND_TOP, 0, 0, 0, 0, flags);
         }
     }
@@ -140,7 +178,7 @@ internal sealed class CalendarWidget : Form
     /// <summary>트레이 아이콘 클릭: 다른 창에 가려졌을 때 잠깐 맨 앞으로.</summary>
     public void Peek()
     {
-        if (!IsHandleCreated) return;
+        if (!IsHandleCreated || _w.AlwaysOnTop) return;
         _peek = true;
         Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         _peekTimer.Stop();
@@ -152,26 +190,23 @@ internal sealed class CalendarWidget : Form
         if (!_peek) return;
         _peek = false;
         _peekTimer.Stop();
-        Native.SetWindowPos(Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         ApplyPin();
     }
 
     protected override void WndProc(ref Message m)
     {
-        if (_s.PinToDesktop && !_peek)
+        bool atBottom = _w.PinToDesktop && !_w.AlwaysOnTop && !_peek;
+        if (atBottom && m.Msg == Native.WM_WINDOWPOSCHANGING)
         {
-            if (m.Msg == Native.WM_WINDOWPOSCHANGING)
-            {
-                var wp = Marshal.PtrToStructure<Native.WINDOWPOS>(m.LParam);
-                wp.hwndInsertAfter = Native.HWND_BOTTOM;
-                Marshal.StructureToPtr(wp, m.LParam, false);
-            }
-            else if (m.Msg == Native.WM_MOUSEACTIVATE)
-            {
-                // 클릭해도 활성화되지 않음 → 작업 중인 창의 포커스를 뺏지 않는다
-                m.Result = Native.MA_NOACTIVATE;
-                return;
-            }
+            var wp = Marshal.PtrToStructure<Native.WINDOWPOS>(m.LParam);
+            wp.hwndInsertAfter = Native.HWND_BOTTOM;
+            Marshal.StructureToPtr(wp, m.LParam, false);
+        }
+        else if ((atBottom || _w.AlwaysOnTop) && m.Msg == Native.WM_MOUSEACTIVATE)
+        {
+            // 클릭해도 활성화되지 않음 → 작업 중인 창의 포커스를 뺏지 않는다
+            m.Result = Native.MA_NOACTIVATE;
+            return;
         }
         base.WndProc(ref m);
     }
@@ -191,15 +226,29 @@ internal sealed class CalendarWidget : Form
         int startDow = _s.WeekStartsMonday ? 1 : 0;
         int offset = ((int)first.DayOfWeek - startDow + 7) % 7;
         _gridStart = first.AddDays(-offset);
-        _svc.SetViewRange(_gridStart, _gridStart.AddDays(Weeks * 7));
+        var end = _gridStart.AddDays(GridDays);
+        if (HasAgenda && _selected.AddDays(60) > end) end = _selected.AddDays(60);
+        _svc.SetViewRange(this, _gridStart < _selected || !HasAgenda ? _gridStart : _selected, end);
         RebuildDays();
+    }
+
+    /// <summary>달력에 보이는 날짜 수 (월간은 항상 6주, 미니는 그 달에 필요한 만큼).</summary>
+    int VisibleWeeks
+    {
+        get
+        {
+            if (_w.Kind == WidgetKind.Month) return 6;
+            var first = new DateTime(_year, _month, 1);
+            int offset = (int)(first - _gridStart).TotalDays;
+            return (offset + DateTime.DaysInMonth(_year, _month) + 6) / 7;
+        }
     }
 
     public void RebuildDays()
     {
         foreach (var d in _days) d.Clear();
         Array.Clear(_holiday);
-        var gridEnd = _gridStart.AddDays(Weeks * 7);
+        var gridEnd = _gridStart.AddDays(GridDays);
         var visible = _svc.Store.Calendars.Where(_s.IsCalendarVisible).ToDictionary(c => c.Id);
 
         foreach (var e in _svc.Store.Events)
@@ -216,6 +265,27 @@ internal sealed class CalendarWidget : Form
             }
         }
         foreach (var d in _days) d.Sort(CompareEvents);
+        RebuildAgenda();
+    }
+
+    /// <summary>선택한 날부터 일정이 있는 날만 모은 목록 (선택한 날은 비어 있어도 표시).</summary>
+    void RebuildAgenda()
+    {
+        _agenda.Clear();
+        if (!HasAgenda) return;
+        var from = _selected.Date;
+        var to = from.AddDays(60);
+        var visible = _svc.Store.Calendars.Where(_s.IsCalendarVisible).Select(c => c.Id).ToHashSet();
+        var candidates = _svc.Store.Events.Where(e => visible.Contains(e.CalendarId) && e.Start < to && e.End > from).ToList();
+        int total = 0;
+        for (var day = from; day < to && total < 40; day = day.AddDays(1))
+        {
+            var list = candidates.Where(e => e.OccursOn(day)).ToList();
+            if (list.Count == 0 && day != from) continue;
+            list.Sort(CompareEvents);
+            _agenda.Add((day, list));
+            total += list.Count;
+        }
     }
 
     public static int CompareEvents(CalEvent a, CalEvent b)
@@ -255,8 +325,43 @@ internal sealed class CalendarWidget : Form
         _navTimer.Start();
     }
 
+    void GoToday()
+    {
+        _selected = DateTime.Today;
+        _agendaScroll = 0;
+        if (_year == _selected.Year && _month == _selected.Month)
+        {
+            ComputeGrid();
+            Render();
+        }
+        else GoTo(_selected.Year, _selected.Month);
+    }
+
+    void Select(DateTime day)
+    {
+        _selected = day.Date;
+        if (HasAgenda)
+        {
+            _agendaScroll = 0;
+            ComputeGrid();
+            if (_selected.AddDays(60) > _gridStart.AddDays(GridDays + 35))
+            {
+                _navTimer.Stop();
+                _navTimer.Start();
+            }
+        }
+        Render();
+    }
+
+    /// <summary>테마·주 시작 요일 등 전체 설정이 바뀌었을 때.</summary>
     public void SettingsChanged()
     {
+        // 글꼴이 바뀌었을 수 있으니 다시 만든다
+        _fonts?.Dispose();
+        _fonts = null;
+        _popupFont?.Dispose();
+        _popupFont = null;
+        if (_w.Collapsed) ApplyCollapse();
         ComputeGrid();
         Render();
     }
@@ -274,7 +379,71 @@ internal sealed class CalendarWidget : Form
         Render();
     }
 
-    // ===================== 그리기 =====================
+    // ===================== 위젯 설정 =====================
+
+    public void SetOpacity(double value)
+    {
+        _w.Opacity = Math.Round(Math.Clamp(value, 0, 1) * 20) / 20;
+        Render();
+    }
+
+    /// <summary>글자 크기 변경. 내용이 잘리지 않도록 위젯 크기도 같은 비율로 조절한다 (화면 크기 안에서).</summary>
+    public void SetFontScale(double scale)
+    {
+        scale = Math.Clamp(scale, 0.8, 1.6);
+        double ratio = scale / _w.FontScale;
+        _w.FontScale = scale;
+        if (Math.Abs(ratio - 1) > 0.001)
+        {
+            var wa = Screen.FromControl(this).WorkingArea;
+            var min = WidgetSettings.MinimumSize(_w.Kind);
+            _w.Width = (int)Math.Clamp(Math.Round(_w.Width * ratio), min.Width, wa.Width / Scale * 0.95);
+            _w.Height = (int)Math.Clamp(Math.Round(_w.Height * ratio), min.Height, wa.Height / Scale * 0.95);
+            var b = new Rectangle(Left, Top, (int)(_w.Width * Scale), _w.Collapsed ? CollapsedHeight(Scale) : (int)(_w.Height * Scale));
+            // 화면 밖으로 나가지 않게
+            b.X = Math.Clamp(b.X, wa.Left, Math.Max(wa.Left, wa.Right - b.Width));
+            b.Y = Math.Clamp(b.Y, wa.Top, Math.Max(wa.Top, wa.Bottom - b.Height));
+            Bounds = b;
+            _w.X = b.X;
+            _w.Y = b.Y;
+        }
+        if (_w.Collapsed) ApplyCollapse();
+        Render();
+        _host.SaveSettings();
+    }
+
+    public void ToggleCollapsed()
+    {
+        _w.Collapsed = !_w.Collapsed;
+        ApplyCollapse();
+        _host.SaveSettings();
+    }
+
+    void ApplyCollapse()
+    {
+        var min = WidgetSettings.MinimumSize(_w.Kind);
+        if (_w.Collapsed)
+        {
+            MinimumSize = new Size((int)(min.Width * Scale), 1);
+            Height = CollapsedHeight(Scale);
+        }
+        else
+        {
+            MinimumSize = new Size((int)(min.Width * Scale), (int)(min.Height * Scale));
+            Height = (int)(_w.Height * Scale);
+        }
+        Render();
+    }
+
+    public void ToggleAlwaysOnTop()
+    {
+        _w.AlwaysOnTop = !_w.AlwaysOnTop;
+        ApplyPin();
+        Render();
+        _host.SaveSettings();
+    }
+
+    // ===================== 그리기 표면 =====================
 
     void EnsureSurface(int w, int h)
     {
@@ -316,7 +485,7 @@ internal sealed class CalendarWidget : Form
         {
             g.Clear(Color.Transparent);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             PaintWidget(g);
         }
@@ -331,8 +500,9 @@ internal sealed class CalendarWidget : Form
     }
 
     /// <summary>개발용: 위젯을 샘플 배경 위에 합성해서 PNG 로 저장.</summary>
-    public void SaveSnapshot(string path)
+    public void SaveSnapshot(string path, bool hover = false)
     {
+        _inside = hover;
         Render();
         if (_surface == null) return;
         using var bmp = new Bitmap(Width + 40, Height + 40);
@@ -346,254 +516,37 @@ internal sealed class CalendarWidget : Form
         bmp.Save(path, ImageFormat.Png);
     }
 
-    UiFonts Fonts
-    {
-        get
-        {
-            if (_fonts == null || _fonts.Scale != Scale)
-            {
-                _fonts?.Dispose();
-                _fonts = new UiFonts(Scale);
-            }
-            return _fonts;
-        }
-    }
-
-    void PaintWidget(Graphics g)
-    {
-        _hits.Clear();
-        float S = Scale;
-        var th = _s.DarkTheme ? Theme.Dark : Theme.Light;
-        var f = Fonts;
-        int W = Width, H = Height;
-        // 배경이 거의 투명하면 글자에 그림자를 넣어서 배경화면 위에서도 읽히게
-        bool shadow = _s.DarkTheme && _s.Opacity < 0.6;
-
-        // --- 배경 (알파 0 이면 클릭이 통과하므로 최소값 유지)
-        int bgA = Math.Max(4, (int)Math.Round(Math.Clamp(_s.Opacity, 0, 1) * 255));
-        using (var path = RoundRect(new RectangleF(0.5f, 0.5f, W - 1, H - 1), 12 * S))
-        {
-            using (var b = new SolidBrush(Color.FromArgb(bgA, th.Bg))) g.FillPath(b, path);
-            if (_s.Opacity >= 0.08)
-                using (var p = new Pen(Color.FromArgb(Math.Min(40, bgA / 4), th.Border), 1)) g.DrawPath(p, path);
-        }
-
-        float pad = 14 * S;
-        float headerH = 46 * S;
-        float weekH = 24 * S;
-        float footerH = 22 * S;
-
-        // --- 머리글
-        _hits.Add(new Hit(HitKind.Drag, new RectangleF(0, 0, W, headerH + weekH)));
-        var titleRect = new RectangleF(pad, 4 * S, W / 2f, headerH - 4 * S);
-        DrawText(g, $"{_year}년 {_month}월", f.Title, th.Fg, titleRect, Sf.LeftCenter, shadow);
-
-        float bs = 30 * S;
-        float by = 4 * S + (headerH - 4 * S - bs) / 2;
-        float bx = W - pad + 4 * S;
-        Button(g, ref bx, by, bs, bs, Btn.Menu, "", th, f, shadow);
-        Button(g, ref bx, by, bs, bs, Btn.Add, "", th, f, shadow);
-        Button(g, ref bx, by, bs, bs, Btn.Sync, "", th, f, shadow, dim: _svc.IsSyncing);
-        bx -= 6 * S;
-        Button(g, ref bx, by, bs, bs, Btn.Next, "", th, f, shadow);
-        Button(g, ref bx, by, 44 * S, bs, Btn.Today, "오늘", th, f, shadow, text: true);
-        Button(g, ref bx, by, bs, bs, Btn.Prev, "", th, f, shadow);
-
-        // --- 요일
-        float gridL = 8 * S, gridR = W - 8 * S;
-        float cellW = (gridR - gridL) / 7f;
-        int startDow = _s.WeekStartsMonday ? 1 : 0;
-        for (int c = 0; c < 7; c++)
-        {
-            int dow = (startDow + c) % 7;
-            var color = dow == 0 ? th.Sunday : dow == 6 ? th.Saturday : Theme.WithAlpha(th.Fg, 170);
-            DrawText(g, DayNames[dow], f.Weekday, color, new RectangleF(gridL + c * cellW, headerH, cellW, weekH), Sf.Center, shadow);
-        }
-
-        // --- 날짜 칸
-        float gridT = headerH + weekH;
-        float gridB = H - footerH;
-        float cellH = (gridB - gridT) / Weeks;
-        var today = DateTime.Today;
-        using var gridPen = new Pen(th.Grid, Math.Max(1, S * 0.8f));
-
-        for (int r = 0; r < Weeks; r++)
-            g.DrawLine(gridPen, gridL + 4 * S, gridT + r * cellH, gridR - 4 * S, gridT + r * cellH);
-
-        float lineH = 17 * S;
-        for (int i = 0; i < Weeks * 7; i++)
-        {
-            var day = _gridStart.AddDays(i);
-            var cell = new RectangleF(gridL + (i % 7) * cellW, gridT + (i / 7) * cellH, cellW, cellH);
-            _hits.Add(new Hit(HitKind.Cell, cell, i));
-            bool inMonth = day.Month == _month;
-
-            var inner = RectangleF.Inflate(cell, -2 * S, -2 * S);
-            if (day == _selected && !(day == today))
-                FillRound(g, inner, 6 * S, Theme.WithAlpha(th.Accent, 40));
-            else if (_hover.Kind is HitKind.Cell or HitKind.DayNumber && _hover.Index == i)
-                FillRound(g, inner, 6 * S, th.Hover);
-
-            // 날짜 숫자
-            int dow = (int)day.DayOfWeek;
-            var numColor = _holiday[i] || dow == 0 ? th.Sunday : dow == 6 ? th.Saturday : th.Fg;
-            if (!inMonth) numColor = Theme.WithAlpha(numColor, th.DimAlpha);
-            var numRect = new RectangleF(cell.X + 4 * S, cell.Y + 3 * S, 22 * S, 19 * S);
-            if (day == today)
-            {
-                FillRound(g, numRect, 9.5f * S, th.Accent);
-                DrawText(g, day.Day.ToString(), f.DayBold, Color.White, numRect, Sf.Center, false);
-            }
-            else
-            {
-                DrawText(g, day.Day.ToString(), day == _selected ? f.DayBold : f.Day, numColor, numRect, Sf.Center, shadow);
-            }
-            _hits.Add(new Hit(HitKind.DayNumber, numRect, i));
-
-            // 일정
-            var events = _days[i];
-            if (events.Count == 0) continue;
-            float y = cell.Y + 24 * S;
-            int fit = Math.Max(0, (int)((cell.Bottom - y - 2 * S) / lineH));
-            if (fit == 0) continue;
-            int show = events.Count > fit ? fit - 1 : events.Count;
-            for (int k = 0; k < show; k++)
-            {
-                var ev = events[k];
-                var er = new RectangleF(cell.X + 3 * S, y, cell.Width - 6 * S, lineH - 2 * S);
-                DrawEvent(g, ev, er, th, f, shadow, inMonth, _hover.Kind == HitKind.Event && _hover.Event == ev && _hover.Index == i);
-                _hits.Add(new Hit(HitKind.Event, er, i, Event: ev));
-                y += lineH;
-            }
-            if (show < events.Count)
-            {
-                var mr = new RectangleF(cell.X + 3 * S, y, cell.Width - 6 * S, lineH - 2 * S);
-                bool hov = _hover.Kind == HitKind.More && _hover.Index == i;
-                if (hov) FillRound(g, mr, 4 * S, th.Hover);
-                DrawText(g, $"+{events.Count - show}개", f.Small, Theme.WithAlpha(th.Fg, 170), RectangleF.Inflate(mr, -4 * S, 0), Sf.LeftCenter, shadow);
-                _hits.Add(new Hit(HitKind.More, mr, i));
-            }
-        }
-
-        // --- 바닥글: 상태 / 크기 조절
-        var statusRect = new RectangleF(pad, gridB, W * 0.6f, footerH - 2 * S);
-        bool actionable = !_svc.IsSignedIn && !_svc.IsSigningIn;
-        string status = _svc.IsSyncing ? "동기화 중…" : _svc.Status;
-        var statusColor = actionable ? th.Accent : Theme.WithAlpha(th.Fg, 120);
-        if (actionable && _hover.Kind == HitKind.Status) statusColor = Theme.WithAlpha(th.Accent, 200);
-        DrawText(g, status, actionable ? f.SmallBold : f.Small, statusColor, statusRect, Sf.LeftCenter, shadow);
-        if (actionable)
-        {
-            var sz = g.MeasureString(status, f.SmallBold, PointF.Empty, Sf.LeftCenter);
-            _hits.Add(new Hit(HitKind.Status, new RectangleF(statusRect.X, statusRect.Y, sz.Width + 4 * S, statusRect.Height)));
-        }
-        _hits.Add(new Hit(HitKind.Drag, new RectangleF(statusRect.Right, gridB, W - statusRect.Right - 20 * S, footerH)));
-
-        if (!_s.Locked)
-        {
-            var grip = new RectangleF(W - 20 * S, H - 20 * S, 20 * S, 20 * S);
-            using var gb = new SolidBrush(Theme.WithAlpha(th.Fg, _hover.Kind == HitKind.Grip ? 200 : 90));
-            float d = 2.2f * S;
-            for (int a = 0; a < 3; a++)
-                for (int b = 0; b <= a; b++)
-                    g.FillEllipse(gb, W - (7 + b * 4.5f) * S - d / 2, H - (7 + (a - b) * 4.5f) * S - d / 2, d, d);
-            _hits.Add(new Hit(HitKind.Grip, grip));
-        }
-    }
-
-    void DrawEvent(Graphics g, CalEvent ev, RectangleF r, Theme th, UiFonts f, bool shadow, bool inMonth, bool hover)
-    {
-        var cal = _svc.Store.FindCalendar(ev.CalendarId);
-        var color = Theme.EventColor(ev.ColorId, cal?.Color ?? "#4F8CFF");
-        float S = Scale;
-        int dimMul = inMonth ? 255 : 150;
-
-        if (ev.AllDay || ev.IsMultiDay)
-        {
-            FillRound(g, r, 4 * S, Color.FromArgb((hover ? 255 : 225) * dimMul / 255, color));
-            var tr = RectangleF.Inflate(r, -4 * S, 0);
-            DrawText(g, ev.Title, f.Event, Theme.WithAlpha(Theme.TextOn(color), dimMul), tr, Sf.LeftCenter, false);
-        }
-        else
-        {
-            if (hover) FillRound(g, r, 4 * S, th.Hover);
-            var bar = new RectangleF(r.X + 1 * S, r.Y + 2 * S, 3 * S, r.Height - 4 * S);
-            FillRound(g, bar, 1.5f * S, Theme.WithAlpha(color, dimMul));
-            var text = $"{ev.Start:HH:mm} {ev.Title}";
-            var tr = new RectangleF(r.X + 7 * S, r.Y, r.Width - 8 * S, r.Height);
-            DrawText(g, text, f.Event, Theme.WithAlpha(th.Fg, inMonth ? 235 : 130), tr, Sf.LeftCenter, shadow);
-        }
-    }
-
-    void Button(Graphics g, ref float right, float y, float w, float h, Btn id, string glyph, Theme th, UiFonts f,
-        bool shadow, bool text = false, bool dim = false)
-    {
-        var r = new RectangleF(right - w, y, w, h);
-        right -= w + 2 * Scale;
-        bool hover = _hover.Kind == HitKind.Button && _hover.Button == id;
-        if (hover) FillRound(g, r, 6 * Scale, th.Hover);
-        var color = Theme.WithAlpha(th.Fg, dim ? 90 : hover ? 255 : 210);
-        DrawText(g, glyph, text ? f.ButtonText : f.Icon, color, r, Sf.Center, shadow);
-        _hits.Add(new Hit(HitKind.Button, r, Button: id));
-    }
-
-    void DrawText(Graphics g, string s, Font font, Color color, RectangleF r, StringFormat sf, bool shadow)
-    {
-        if (shadow)
-        {
-            var sr = r;
-            sr.Offset(0, Math.Max(1, Scale));
-            using var sb = new SolidBrush(Color.FromArgb(color.A * 140 / 255, 0, 0, 0));
-            g.DrawString(s, font, sb, sr, sf);
-        }
-        using var b = new SolidBrush(color);
-        g.DrawString(s, font, b, r, sf);
-    }
-
-    static void FillRound(Graphics g, RectangleF r, float radius, Color c)
-    {
-        using var path = RoundRect(r, radius);
-        using var b = new SolidBrush(c);
-        g.FillPath(b, path);
-    }
-
-    public static GraphicsPath RoundRect(RectangleF r, float radius)
-    {
-        var path = new GraphicsPath();
-        float d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
-        if (d <= 0.5f) { path.AddRectangle(r); return path; }
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
-
-    static bool FontExists(string name)
-    {
-        try { using var ff = new FontFamily(name); return true; }
-        catch { return false; }
-    }
-
     // ===================== 입력 =====================
 
     Hit HitTest(Point p)
     {
         for (int i = _hits.Count - 1; i >= 0; i--)
-            if (_hits[i].Rect.Contains(p)) return _hits[i];
+            if (_hits[i].Rect.Contains(p) && _hits[i].Kind != HitKind.AgendaArea) return _hits[i];
         return default;
     }
+
+    bool OverAgenda(Point p) => _hits.Any(h => h.Kind == HitKind.AgendaArea && h.Rect.Contains(p));
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
+        // 제목을 누른 채 움직이면 창 이동, 그냥 떼면 '오늘'로
+        if (_pressed.Kind == HitKind.Title && e.Button == MouseButtons.Left && !_w.Locked &&
+            (Math.Abs(e.X - _pressPoint.X) > 4 || Math.Abs(e.Y - _pressPoint.Y) > 4))
+        {
+            _pressed = default;
+            BeginNativeDrag(Native.HTCAPTION);
+            return;
+        }
         var h = HitTest(e.Location);
-        if (h == _hover) return;
+        bool enter = !_inside;
+        _inside = true;
+        if (h == _hover && !enter) return;
         _hover = h;
         Cursor = h.Kind switch
         {
-            HitKind.Button or HitKind.Event or HitKind.More or HitKind.Status or HitKind.DayNumber => Cursors.Hand,
+            HitKind.Button or HitKind.Event or HitKind.More or HitKind.Status or HitKind.DayNumber
+                or HitKind.MiniDay or HitKind.AddDay or HitKind.Title => Cursors.Hand,
             HitKind.Grip => Cursors.SizeNWSE,
             _ => Cursors.Default,
         };
@@ -603,12 +556,17 @@ internal sealed class CalendarWidget : Form
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
-        if (_hover.Kind != HitKind.None)
-        {
-            _hover = default;
-            Render();
-        }
-        if (_peek && !Bounds.Contains(Cursor.Position)) EndPeek();
+        if (Bounds.Contains(Cursor.Position)) return; // 팝업 위로 잠시 벗어난 경우
+        _inside = false;
+        _hover = default;
+        Render();
+        if (_peek) EndPeek();
+    }
+
+    void BeginNativeDrag(int hitTest)
+    {
+        Native.ReleaseCapture();
+        Native.SendMessage(Handle, Native.WM_NCLBUTTONDOWN, (IntPtr)hitTest, IntPtr.Zero);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -618,24 +576,23 @@ internal sealed class CalendarWidget : Form
         _pressed = default;
         if (e.Button == MouseButtons.Right)
         {
-            ShowMenu(PointToScreen(e.Location));
+            _host.ShowWidgetMenu(this, PointToScreen(e.Location));
             return;
         }
         if (e.Button != MouseButtons.Left) return;
 
-        if (e.Clicks == 2 && h.Kind is HitKind.Cell)
+        if (e.Clicks == 2 && h.Kind is HitKind.Cell or HitKind.MiniDay)
         {
             OpenEditor(null, _gridStart.AddDays(h.Index));
             return;
         }
-        if (!_s.Locked && h.Kind is HitKind.Drag or HitKind.Grip)
+        if (!_w.Locked && h.Kind is HitKind.Drag or HitKind.Grip)
         {
-            Native.ReleaseCapture();
-            Native.SendMessage(Handle, Native.WM_NCLBUTTONDOWN,
-                h.Kind == HitKind.Grip ? Native.HTBOTTOMRIGHT : Native.HTCAPTION, IntPtr.Zero);
+            BeginNativeDrag(h.Kind == HitKind.Grip ? Native.HTBOTTOMRIGHT : Native.HTCAPTION);
             return;
         }
         _pressed = h;
+        _pressPoint = e.Location;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -645,12 +602,14 @@ internal sealed class CalendarWidget : Form
         var h = HitTest(e.Location);
         var p = _pressed;
         _pressed = default;
-        if (p.Kind == HitKind.None || p.Kind != h.Kind || p.Index != h.Index || p.Button != h.Button) return;
+        if (p.Kind == HitKind.None || p.Kind != h.Kind || p.Index != h.Index || p.Button != h.Button || p.Date != h.Date) return;
 
         switch (h.Kind)
         {
             case HitKind.Button: OnButton(h.Button, h.Rect); break;
-            case HitKind.Event: OpenEditor(h.Event, _gridStart.AddDays(h.Index)); break;
+            case HitKind.Title: ShowMonthPicker(h.Rect); break;
+            case HitKind.Event: OpenEditor(h.Event, h.Date == default ? _gridStart.AddDays(h.Index) : h.Date); break;
+            case HitKind.AddDay: OpenEditor(null, h.Date); break;
             case HitKind.More:
             case HitKind.DayNumber:
                 _selected = _gridStart.AddDays(h.Index);
@@ -661,13 +620,39 @@ internal sealed class CalendarWidget : Form
                 _selected = _gridStart.AddDays(h.Index);
                 Render();
                 break;
-            case HitKind.Status: _ = _svc.SignInAsync(this); break;
+            case HitKind.MiniDay:
+                var day = _gridStart.AddDays(h.Index);
+                if (HasAgenda) Select(day);
+                else
+                {
+                    _selected = day;
+                    Render();
+                    OpenDayList(day);
+                }
+                break;
+            case HitKind.Status:
+                if (!_svc.IsSignedIn) _ = _svc.SignInAsync(this);
+                else if (!_svc.IsSyncing) _ = _svc.SyncAsync();
+                break;
         }
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
+        if ((ModifierKeys & Keys.Control) != 0)
+        {
+            // Ctrl + 휠: 배경 불투명도 5% 단위
+            SetOpacity(_w.Opacity + (e.Delta > 0 ? 0.05 : -0.05));
+            _host.SaveSettings();
+            return;
+        }
+        if (OverAgenda(e.Location))
+        {
+            _agendaScroll = Math.Clamp(_agendaScroll - Math.Sign(e.Delta) * 60 * U, 0, _agendaMaxScroll);
+            Render();
+            return;
+        }
         Navigate(e.Delta > 0 ? -1 : 1);
     }
 
@@ -677,25 +662,38 @@ internal sealed class CalendarWidget : Form
         {
             case Btn.Prev: Navigate(-1); break;
             case Btn.Next: Navigate(1); break;
-            case Btn.Today:
-                _selected = DateTime.Today;
-                if (_year == _selected.Year && _month == _selected.Month) Render();
-                else GoTo(_selected.Year, _selected.Month);
-                break;
-            case Btn.Sync:
-                if (_svc.IsSignedIn) _ = _svc.SyncAsync();
-                else _ = _svc.SignInAsync(this);
-                break;
+            case Btn.Today: GoToday(); break;
             case Btn.Add: OpenEditor(null, _selected); break;
-            case Btn.Menu: ShowMenu(PointToScreen(new Point((int)rect.Right, (int)rect.Bottom))); break;
+            case Btn.View: ShowViewPopup(rect); break;
+            case Btn.Pin: ToggleAlwaysOnTop(); break;
+            case Btn.Collapse: ToggleCollapsed(); break;
+            case Btn.Hide: _host.HideWidget(this); break;
+            case Btn.Menu: _host.ShowWidgetMenu(this, PointToScreen(new Point((int)rect.Right, (int)rect.Bottom))); break;
         }
     }
 
-    void ShowMenu(Point screen)
+    /// <summary>제목을 누르면 연·월을 골라 바로 이동.</summary>
+    void ShowMonthPicker(RectangleF title)
     {
-        // 활성화되지 않은 창에서 띄운 메뉴는 바깥 클릭으로 닫히지 않으므로 먼저 전경으로
+        var p = Palette.For(_s.DarkTheme);
+        _popupFont ??= Ui.Font(13 * Scale);
+        var picker = new MonthPicker(p, _year, _month, _popupFont);
+        picker.Chosen += (y, m) => GoTo(y, m);
         Native.SetForegroundWindow(Handle);
-        _menu.Show(screen, ToolStripDropDownDirection.Default);
+        var pt = PointToScreen(new Point((int)title.X, (int)title.Bottom + 4));
+        Popup.ShowAt(this, pt, picker, p);
+    }
+
+    void ShowViewPopup(RectangleF button)
+    {
+        var p = Palette.For(_s.DarkTheme);
+        _popupFont ??= Ui.Font(13 * Scale);
+        var panel = new ViewPanel(p, _w.Opacity, _w.FontScale, _popupFont);
+        panel.OpacityChanged += SetOpacity;
+        panel.FontScaleChanged += SetFontScale;
+        Native.SetForegroundWindow(Handle);
+        var pt = PointToScreen(new Point((int)(button.Right - panel.Width), (int)button.Bottom + 4));
+        Popup.ShowAt(this, pt, panel, p, closed: _host.SaveSettings);
     }
 
     protected override void OnResizeEnd(EventArgs e)
@@ -718,11 +716,11 @@ internal sealed class CalendarWidget : Form
 
     void SaveBounds()
     {
-        _s.X = Left;
-        _s.Y = Top;
-        _s.Width = (int)Math.Round(Width / Scale);
-        _s.Height = (int)Math.Round(Height / Scale);
-        _s.Save();
+        _w.X = Left;
+        _w.Y = Top;
+        _w.Width = (int)Math.Round(Width / Scale);
+        if (!_w.Collapsed) _w.Height = (int)Math.Round(Height / Scale);
+        _host.SaveSettings();
     }
 
     // ===================== 대화상자 =====================
@@ -756,57 +754,15 @@ internal sealed class CalendarWidget : Form
         if (disposing)
         {
             _svc.Changed -= OnServiceChanged;
+            _svc.RemoveViewRange(this);
             _navTimer.Dispose();
             _peekTimer.Dispose();
             _fonts?.Dispose();
+            _popupFont?.Dispose();
             _editor?.Close();
             _dayList?.Close();
         }
         FreeSurface();
         base.Dispose(disposing);
-    }
-
-    // ===================== 글꼴 / 정렬 =====================
-
-    sealed class UiFonts : IDisposable
-    {
-        public readonly float Scale;
-        public readonly Font Title, Weekday, Day, DayBold, Event, Small, SmallBold, Icon, ButtonText;
-
-        public UiFonts(float s)
-        {
-            Scale = s;
-            Title = new Font(UiFamily, 19 * s, FontStyle.Bold, GraphicsUnit.Pixel);
-            Weekday = new Font(UiFamily, 11.5f * s, FontStyle.Regular, GraphicsUnit.Pixel);
-            Day = new Font(UiFamily, 12.5f * s, FontStyle.Regular, GraphicsUnit.Pixel);
-            DayBold = new Font(UiFamily, 12.5f * s, FontStyle.Bold, GraphicsUnit.Pixel);
-            Event = new Font(UiFamily, 11 * s, FontStyle.Regular, GraphicsUnit.Pixel);
-            Small = new Font(UiFamily, 11 * s, FontStyle.Regular, GraphicsUnit.Pixel);
-            SmallBold = new Font(UiFamily, 11 * s, FontStyle.Bold, GraphicsUnit.Pixel);
-            Icon = new Font(IconFamily, 13 * s, FontStyle.Regular, GraphicsUnit.Pixel);
-            ButtonText = new Font(UiFamily, 12 * s, FontStyle.Regular, GraphicsUnit.Pixel);
-        }
-
-        public void Dispose()
-        {
-            foreach (var f in new[] { Title, Weekday, Day, DayBold, Event, Small, SmallBold, Icon, ButtonText }) f.Dispose();
-        }
-    }
-
-    static class Sf
-    {
-        // GenericTypographic 기반: GDI+ 기본 서식은 한글 자간이 넓게 벌어진다
-        public static readonly StringFormat Center = Make(StringAlignment.Center, StringTrimming.None);
-        public static readonly StringFormat LeftCenter = Make(StringAlignment.Near, StringTrimming.EllipsisCharacter);
-
-        static StringFormat Make(StringAlignment align, StringTrimming trimming)
-        {
-            var sf = (StringFormat)StringFormat.GenericTypographic.Clone();
-            sf.FormatFlags |= StringFormatFlags.NoWrap;
-            sf.Alignment = align;
-            sf.LineAlignment = StringAlignment.Center;
-            sf.Trimming = trimming;
-            return sf;
-        }
     }
 }

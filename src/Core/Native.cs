@@ -80,4 +80,19 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr process, nint min, nint max);
+
+    /// <summary>
+    /// 쓰지 않는 메모리를 정리하고 운영체제에 돌려준다.
+    /// 위젯을 모두 끄고 트레이에만 있을 때 호출해서 백그라운드 점유를 최소화한다.
+    /// </summary>
+    public static void TrimMemory()
+    {
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+        SetProcessWorkingSetSize(GetCurrentProcess(), -1, -1);
+    }
 }

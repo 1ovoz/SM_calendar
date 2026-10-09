@@ -9,7 +9,7 @@
     <RootNamespace>SMCalendar</RootNamespace>
     <AssemblyName>SMCalendar</AssemblyName>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>SM Calendar</Product>
 
     <!-- WSL/Linux 에서도 Windows 대상 빌드 가능 -->
@@ -27,7 +27,15 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <SatelliteResourceLanguages>ko;en</SatelliteResourceLanguages>
     <DebugType>none</DebugType>
+    <!-- 디자이너를 쓰지 않으므로 코드 직렬화 경고는 무시 -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 무료 글꼴 Pretendard (SIL OFL 1.1) -->
+    <None Include="fonts\Pretendard-Regular.ttf;fonts\Pretendard-Bold.ttf;fonts\Pretendard-OFL.txt"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />

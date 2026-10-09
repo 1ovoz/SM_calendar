@@ -13,7 +13,8 @@ namespace SMCalendar.Core;
 /// </summary>
 internal sealed class GoogleAuth
 {
-    const string Scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly";
+    // 필요한 최소 권한만: 일정 읽기/쓰기 + 구독 중인 캘린더 목록 보기
+    const string Scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly";
     const string AuthEndpoint = "https://accounts.google.com/o/oauth2/v2/auth";
     const string TokenEndpoint = "https://oauth2.googleapis.com/token";
     static readonly byte[] Entropy = "SMCalendar.v1"u8.ToArray();
@@ -105,28 +106,42 @@ internal sealed class GoogleAuth
             while (code == null)
             {
                 using var tcp = await listener.AcceptTcpClientAsync(timeout.Token);
+                // 로컬의 다른 프로그램이 연결만 하고 버티는 경우 대비: 연결당 10초 제한
+                using var perConn = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+                perConn.CancelAfter(TimeSpan.FromSeconds(10));
                 var stream = tcp.GetStream();
-                using var reader = new StreamReader(stream, Encoding.ASCII, false, 2048, leaveOpen: true);
-                var requestLine = await reader.ReadLineAsync(timeout.Token) ?? "";
-                // 헤더를 끝까지 읽어야 브라우저가 연결 리셋 오류를 띄우지 않는다.
-                while (!string.IsNullOrEmpty(await reader.ReadLineAsync(timeout.Token))) { }
+                string requestLine;
+                try
+                {
+                    requestLine = await ReadRequestAsync(stream, perConn.Token);
+                }
+                catch (Exception) when (!timeout.IsCancellationRequested)
+                {
+                    continue; // 잘못된 요청은 무시하고 다음 연결을 기다린다
+                }
 
                 var parts = requestLine.Split(' ');
                 var query = ParseQuery(parts.Length > 1 ? parts[1] : "/");
 
+                // state 가 일치하는 요청만 처리 (다른 프로그램이 보낸 가짜 응답 무시)
+                if (query.GetValueOrDefault("state") != state)
+                {
+                    await RespondAsync(stream, 404, "");
+                    continue;
+                }
                 if (query.TryGetValue("error", out var error))
                 {
                     await RespondAsync(stream, 200, Page("로그인이 취소되었습니다", "창을 닫고 다시 시도하세요."));
                     throw new AuthException("로그인이 취소되었습니다: " + error);
                 }
-                if (query.TryGetValue("code", out var c) && query.GetValueOrDefault("state") == state)
+                if (query.TryGetValue("code", out var c) && c.Length > 0)
                 {
                     code = c;
                     await RespondAsync(stream, 200, Page("연결 완료", "SM Calendar 가 Google 캘린더에 연결되었습니다. 이 창을 닫아도 됩니다."));
                 }
                 else
                 {
-                    await RespondAsync(stream, 404, "");
+                    await RespondAsync(stream, 400, "");
                 }
             }
 
@@ -216,11 +231,30 @@ internal sealed class GoogleAuth
                ?? throw new ApiException(0, "토큰 응답을 읽을 수 없음");
     }
 
+    /// <summary>요청 줄을 읽고 헤더를 끝까지 소비한다. 너무 긴 요청(8KB 초과)은 거부.</summary>
+    static async Task<string> ReadRequestAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new byte[8192];
+        int total = 0;
+        while (total < buffer.Length)
+        {
+            int n = await stream.ReadAsync(buffer.AsMemory(total), ct);
+            if (n == 0) break;
+            total += n;
+            // 헤더 끝(빈 줄)까지 받으면 충분
+            if (buffer.AsSpan(0, total).IndexOf("\r\n\r\n"u8) >= 0) break;
+        }
+        var text = Encoding.ASCII.GetString(buffer, 0, total);
+        int eol = text.IndexOf("\r\n", StringComparison.Ordinal);
+        if (eol <= 0 || !text.StartsWith("GET ", StringComparison.Ordinal)) throw new IOException("bad request");
+        return text[..eol];
+    }
+
     static async Task RespondAsync(Stream stream, int status, string html)
     {
         var body = Encoding.UTF8.GetBytes(html);
         var head = Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 {status} {(status == 200 ? "OK" : "Not Found")}\r\n" +
+            $"HTTP/1.1 {status} {(status == 200 ? "OK" : "Error")}\r\n" +
             "Content-Type: text/html; charset=utf-8\r\n" +
             $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
         await stream.WriteAsync(head);
@@ -230,7 +264,7 @@ internal sealed class GoogleAuth
 
     static string Page(string title, string message) =>
         "<!doctype html><html lang=ko><meta charset=utf-8><title>SM Calendar</title>" +
-        "<body style=\"font-family:'Malgun Gothic',sans-serif;background:#16161a;color:#eee;display:grid;place-items:center;height:100vh;margin:0\">" +
+        "<body style=\"font-family:'Pretendard','Malgun Gothic',sans-serif;background:#16161a;color:#eee;display:grid;place-items:center;height:100vh;margin:0\">" +
         $"<div style=text-align:center><h2>{WebUtility.HtmlEncode(title)}</h2><p>{WebUtility.HtmlEncode(message)}</p></div></body></html>";
 
     static Dictionary<string, string> ParseQuery(string target)

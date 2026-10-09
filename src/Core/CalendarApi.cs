@@ -10,7 +10,7 @@ namespace SMCalendar.Core;
 internal sealed class CalendarApi(GoogleAuth auth)
 {
     const string Base = "https://www.googleapis.com/calendar/v3/";
-    const string EventFields = "id,status,summary,description,location,colorId,recurringEventId,htmlLink,start,end";
+    const string EventFields = "id,status,summary,description,location,colorId,recurringEventId,htmlLink,start,end,reminders";
     static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     public async Task<List<CalendarInfo>> ListCalendarsAsync(CancellationToken ct)
@@ -20,7 +20,7 @@ internal sealed class CalendarApi(GoogleAuth auth)
         do
         {
             var path = "users/me/calendarList?maxResults=250&fields=" +
-                       Uri.EscapeDataString("nextPageToken,items(id,summary,summaryOverride,backgroundColor,accessRole,primary,selected)") +
+                       Uri.EscapeDataString("nextPageToken,items(id,summary,summaryOverride,backgroundColor,accessRole,primary,selected,timeZone)") +
                        (page != null ? "&pageToken=" + Uri.EscapeDataString(page) : "");
             var list = await GetJsonAsync(path, JsonCtx.Default.GCalendarList, ct).ConfigureAwait(false);
             foreach (var c in list.Items ?? [])
@@ -34,6 +34,7 @@ internal sealed class CalendarApi(GoogleAuth auth)
                     AccessRole = c.AccessRole ?? "reader",
                     Primary = c.Primary == true,
                     SelectedInGoogle = c.Selected == true || c.Primary == true,
+                    TimeZone = c.TimeZone,
                 });
             }
             page = list.NextPageToken;
@@ -63,6 +64,15 @@ internal sealed class CalendarApi(GoogleAuth auth)
         return result;
     }
 
+    /// <summary>단일 일정 조회 (반복 일정의 원본에서 recurrence 를 읽을 때 사용).</summary>
+    public async Task<CalEvent> GetEventAsync(string calendarId, string eventId, CancellationToken ct)
+    {
+        var path = $"calendars/{Uri.EscapeDataString(calendarId)}/events/{Uri.EscapeDataString(eventId)}" +
+                   $"?fields={Uri.EscapeDataString(EventFields + ",recurrence")}";
+        using var resp = await SendAsync(HttpMethod.Get, path, null, ct).ConfigureAwait(false);
+        return await ReadEventAsync(resp, calendarId, ct).ConfigureAwait(false);
+    }
+
     public async Task<CalEvent> InsertEventAsync(EventDraft d, CancellationToken ct)
     {
         var path = $"calendars/{Uri.EscapeDataString(d.CalendarId)}/events?fields={Uri.EscapeDataString(EventFields)}";
@@ -72,7 +82,8 @@ internal sealed class CalendarApi(GoogleAuth auth)
 
     public async Task<CalEvent> PatchEventAsync(string calendarId, string eventId, EventDraft d, CancellationToken ct)
     {
-        var path = $"calendars/{Uri.EscapeDataString(calendarId)}/events/{Uri.EscapeDataString(eventId)}?fields={Uri.EscapeDataString(EventFields)}";
+        var path = $"calendars/{Uri.EscapeDataString(calendarId)}/events/{Uri.EscapeDataString(eventId)}" +
+                   $"?fields={Uri.EscapeDataString(EventFields + ",recurrence")}";
         using var resp = await SendAsync(HttpMethod.Patch, path, BuildJson(d, patch: true), ct).ConfigureAwait(false);
         return await ReadEventAsync(resp, calendarId, ct).ConfigureAwait(false);
     }
@@ -165,14 +176,46 @@ internal sealed class CalendarApi(GoogleAuth auth)
             w.WriteString("summary", d.Title);
             w.WriteString("location", d.Location ?? "");
             w.WriteString("description", d.Description ?? "");
-            WriteTime(w, "start", d.AllDay, d.Start, patch);
-            WriteTime(w, "end", d.AllDay, d.End, patch);
+            WriteTime(w, "start", d.AllDay, d.Start, d.TimeZone, patch);
+            WriteTime(w, "end", d.AllDay, d.End, d.TimeZone, patch);
+
+            if (d.ColorSet)
+            {
+                if (d.ColorId != null) w.WriteString("colorId", d.ColorId);
+                else if (patch) w.WriteNull("colorId"); // 캘린더 기본색으로 되돌리기
+            }
+
+            if (d.Reminders is { } r)
+            {
+                w.WriteStartObject("reminders");
+                w.WriteBoolean("useDefault", r.UseDefault);
+                w.WriteStartArray("overrides");
+                if (!r.UseDefault)
+                {
+                    foreach (var m in r.Minutes.Distinct().Take(5))
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("method", "popup");
+                        w.WriteNumber("minutes", m);
+                        w.WriteEndObject();
+                    }
+                }
+                w.WriteEndArray();
+                w.WriteEndObject();
+            }
+
+            if (d.RecurrenceSet && (d.Recurrence != null || patch))
+            {
+                w.WriteStartArray("recurrence");
+                foreach (var line in d.Recurrence ?? []) w.WriteStringValue(line);
+                w.WriteEndArray();
+            }
             w.WriteEndObject();
         }
         return ms.ToArray();
     }
 
-    static void WriteTime(Utf8JsonWriter w, string name, bool allDay, DateTime t, bool patch)
+    static void WriteTime(Utf8JsonWriter w, string name, bool allDay, DateTime t, string? timeZone, bool patch)
     {
         w.WriteStartObject(name);
         if (allDay)
@@ -183,6 +226,7 @@ internal sealed class CalendarApi(GoogleAuth auth)
         else
         {
             w.WriteString("dateTime", Rfc3339(t));
+            if (timeZone != null) w.WriteString("timeZone", timeZone); // 반복 일정은 시간대가 필수
             if (patch) w.WriteNull("date");
         }
         w.WriteEndObject();
@@ -205,6 +249,9 @@ internal sealed class CalendarApi(GoogleAuth auth)
             ColorId = g.ColorId,
             RecurringEventId = g.RecurringEventId,
             HtmlLink = g.HtmlLink,
+            ReminderDefault = g.Reminders?.UseDefault ?? true,
+            ReminderMinutes = g.Reminders?.Overrides?.Select(o => o.Minutes).Distinct().OrderBy(m => m).ToList(),
+            Recurrence = g.Recurrence,
         };
         if (g.Start.Date != null)
         {

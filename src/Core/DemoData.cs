@@ -22,7 +22,11 @@ internal static class DemoData
             });
 
         Add("me@example.com", "치과 예약", t.AddHours(10), t.AddHours(11), false);
+        store.Events[^1].Location = "서울 강남구 테헤란로 123";
+        store.Events[^1].ReminderDefault = false;
+        store.Events[^1].ReminderMinutes = [30, 1440];
         Add("work", "주간 회의", t.AddHours(14), t.AddHours(15), false);
+        store.Events[^1].RecurringEventId = "weekly-meeting";
         Add("work", "프로젝트 마감", t.AddDays(3), t.AddDays(4), true, "11");
         Add("me@example.com", "운동", t.AddDays(1).AddHours(19), t.AddDays(1).AddHours(20), false);
         Add("me@example.com", "가족 여행", t.AddDays(8), t.AddDays(11), true, "5");

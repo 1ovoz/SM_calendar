@@ -10,11 +10,26 @@ internal sealed class DayListForm : Form
     readonly ListBox _list = new() { Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed, BorderStyle = BorderStyle.None, IntegralHeight = false };
     readonly Button _add = new() { Text = "+ 새 일정", Dock = DockStyle.Bottom, Height = 32 };
     DateTime _day;
+    readonly Palette _p;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Ui.DarkTitleBar(Handle, _p == Palette.Dark);
+        Ui.DarkScrollbars(_list.Handle);
+    }
 
     public DayListForm(CalendarWidget widget)
     {
         _widget = widget;
-        Font = new Font("Malgun Gothic", 9f);
+        _p = Palette.For(widget.DarkTheme);
+        Font = new Font(Ui.Family, 9f);
+        BackColor = _list.BackColor = _p.Bg;
+        ForeColor = _list.ForeColor = _p.Fg;
+        _add.FlatStyle = FlatStyle.Flat;
+        _add.FlatAppearance.BorderSize = 0;
+        _add.BackColor = _p.Surface;
+        _add.ForeColor = _p.Fg;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96, 96);
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
@@ -64,7 +79,8 @@ internal sealed class DayListForm : Form
 
     void DrawItem(object? sender, DrawItemEventArgs e)
     {
-        e.DrawBackground();
+        bool sel = (e.State & DrawItemState.Selected) != 0;
+        using (var bg = new SolidBrush(sel ? _p.SurfaceHover : _p.Bg)) e.Graphics.FillRectangle(bg, e.Bounds);
         if (e.Index < 0 || _list.Items[e.Index] is not CalEvent ev) return;
         var g = e.Graphics;
         var b = e.Bounds;
@@ -73,9 +89,9 @@ internal sealed class DayListForm : Form
             g.FillRectangle(br, b.X + 6, b.Y + 5, 4, b.Height - 10);
         string time = ev.AllDay ? "종일" : ev.Start.Date == _day ? ev.Start.ToString("HH:mm") : "~" + ev.End.ToString("HH:mm");
         var timeRect = new Rectangle(b.X + 16, b.Y, 46, b.Height);
-        TextRenderer.DrawText(g, time, e.Font, timeRect, (e.State & DrawItemState.Selected) != 0 ? e.ForeColor : SystemColors.GrayText,
+        TextRenderer.DrawText(g, time, e.Font, timeRect, _p.Muted,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
-        TextRenderer.DrawText(g, ev.Title, e.Font, new Rectangle(b.X + 64, b.Y, b.Width - 68, b.Height), e.ForeColor,
+        TextRenderer.DrawText(g, ev.Title, e.Font, new Rectangle(b.X + 64, b.Y, b.Width - 68, b.Height), _p.Fg,
             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 }
