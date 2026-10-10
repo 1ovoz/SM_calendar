@@ -161,17 +161,11 @@ internal sealed partial class CalendarWidget : Form
             Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, IntPtr.Zero);
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, flags);
         }
-        else if (_w.PinToDesktop)
+        else
         {
             Native.SetWindowPos(Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
             Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, Native.FindWindow("Progman", null));
             Native.SetWindowPos(Handle, Native.HWND_BOTTOM, 0, 0, 0, 0, flags);
-        }
-        else
-        {
-            Native.SetWindowLongPtr(Handle, Native.GWLP_HWNDPARENT, IntPtr.Zero);
-            Native.SetWindowPos(Handle, Native.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
-            Native.SetWindowPos(Handle, Native.HWND_TOP, 0, 0, 0, 0, flags);
         }
     }
 
@@ -195,7 +189,7 @@ internal sealed partial class CalendarWidget : Form
 
     protected override void WndProc(ref Message m)
     {
-        bool atBottom = _w.PinToDesktop && !_w.AlwaysOnTop && !_peek;
+        bool atBottom = !_w.AlwaysOnTop && !_peek;
         if (atBottom && m.Msg == Native.WM_WINDOWPOSCHANGING)
         {
             var wp = Marshal.PtrToStructure<Native.WINDOWPOS>(m.LParam);

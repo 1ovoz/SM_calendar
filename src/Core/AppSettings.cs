@@ -20,8 +20,7 @@ public sealed class WidgetSettings
     /// <summary>글자 크기 배율 (0.85 ~ 1.55).</summary>
     public double FontScale { get; set; } = 1.0;
     public bool Locked { get; set; }
-    public bool PinToDesktop { get; set; } = true;
-    /// <summary>항상 다른 창 위에 표시 (켜면 바탕화면 고정보다 우선).</summary>
+    /// <summary>표시 방식: true = 항상 위에 표시, false = 바탕화면에 고정 (다른 창 아래, Win+D 에도 남음).</summary>
     public bool AlwaysOnTop { get; set; }
     /// <summary>접힌 상태: 머리글만 표시.</summary>
     public bool Collapsed { get; set; }
@@ -138,7 +137,7 @@ public sealed class AppSettings
             s.Widgets.Add(new WidgetSettings
             {
                 Kind = WidgetKind.Month, X = s.X, Y = s.Y, Width = s.Width, Height = s.Height,
-                Opacity = s.Opacity, Locked = s.Locked, PinToDesktop = s.PinToDesktop,
+                Opacity = s.Opacity, Locked = s.Locked,
             });
             s.WidgetsInitialized = true;
         }

@@ -9,7 +9,7 @@
     <RootNamespace>SMCalendar</RootNamespace>
     <AssemblyName>SMCalendar</AssemblyName>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Product>SM Calendar</Product>
 
     <!-- WSL/Linux 에서도 Windows 대상 빌드 가능 -->

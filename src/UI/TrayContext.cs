@@ -269,9 +269,9 @@ internal sealed class TrayContext : ApplicationContext, IWidgetHost
             }
             _menu.Items.Add(font);
             Add(_menu.Items, ws.Collapsed ? "펼치기" : "접기", target.ToggleCollapsed);
-            Add(_menu.Items, "항상 위에 표시", target.ToggleAlwaysOnTop, check: ws.AlwaysOnTop);
-            Add(_menu.Items, "바탕화면에 고정", () => { ws.PinToDesktop = !ws.PinToDesktop; _s.Save(); target.ApplyPin(); },
-                check: ws.PinToDesktop, enabled: !ws.AlwaysOnTop);
+            // 표시 방식은 둘 중 하나 (일반 창 모드는 없음)
+            Add(_menu.Items, "바탕화면에 고정", () => { if (ws.AlwaysOnTop) target.ToggleAlwaysOnTop(); }, check: !ws.AlwaysOnTop);
+            Add(_menu.Items, "항상 위에 표시", () => { if (!ws.AlwaysOnTop) target.ToggleAlwaysOnTop(); }, check: ws.AlwaysOnTop);
             Add(_menu.Items, "위치/크기 잠금", () => { ws.Locked = !ws.Locked; _s.Save(); target.Render(); }, check: ws.Locked);
             Add(_menu.Items, "위젯 끄기 (트레이로)", () => HideWidget(target));
         }
